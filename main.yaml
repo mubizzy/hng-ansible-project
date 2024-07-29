@@ -1,0 +1,198 @@
+---
+- name: Setup and deploy hng_boilerplate application
+  hosts: hng
+  become: yes
+  vars:
+    pg_user: "admin"
+    pg_password: "admin123"
+    pg_database: "hng_fast_api"
+    repository_url: "https://github.com/hngprojects/hng_boilerplate_python_fastapi_web.git"
+    branch: "devops"
+    app_directory: "/opt/stage_5b"
+    nginx_conf_file: "/etc/nginx/sites-available/stage_5b"
+    nginx_conf_link: "/etc/nginx/sites-enabled/stage_5b"
+    log_directory: "/var/log/stage_5b"
+
+  tasks:
+    - name: Create hng user
+      user:
+        name: hng
+        state: present
+        groups: sudo
+        create_home: yes
+        shell: /bin/bash
+
+    - name: Create /var/secrets directory
+      file:
+        path: /var/secrets
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Save PostgreSQL credentials
+      copy:
+        content: |
+          PGUSER={{ pg_user }}
+          PGPASSWORD={{ pg_password }}
+        dest: /var/secrets/pg_pw.txt
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install dependencies
+      apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - git
+        - postgresql
+        - python3-pip
+        - python3-venv
+        - nginx
+        - rabbitmq-server
+        - redis-server
+
+    - name: Ensure setfacl is installed
+      apt:
+        name: acl
+        state: present
+
+    - name: Configure Git to trust the repository directory
+      command: git config --global --add safe.directory /opt/stage_5b
+
+    - name: Clone the repository as root
+      git:
+        repo: "{{ repository_url }}"
+        dest: "{{ app_directory }}"
+        version: "{{ branch }}"
+        force: yes
+
+    - name: Change ownership of the repository to hng user
+      file:
+        path: "{{ app_directory }}"
+        state: directory
+        owner: hng
+        group: hng
+        recurse: yes
+
+    - name: Set up Python virtual environment
+      command: python3 -m venv venv
+      args:
+        chdir: "{{ app_directory }}"
+      become: yes
+      become_user: hng
+
+    - name: Install Python dependencies
+      pip:
+        requirements: "{{ app_directory }}/requirements.txt"
+        virtualenv: "{{ app_directory }}/venv"
+      become: yes
+      become_user: hng
+
+    - name: Configure PostgreSQL
+      block:
+        - name: Start PostgreSQL service
+          service:
+            name: postgresql
+            state: started
+            enabled: yes
+
+        - name: Set PostgreSQL admin password
+          shell: |
+            sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '{{ pg_password }}';"
+            sudo -u postgres psql -c "CREATE USER {{ pg_user }} WITH PASSWORD '{{ pg_password }}';"
+            sudo -u postgres psql -c "CREATE DATABASE {{ pg_database }};"
+            sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ pg_database }} TO {{ pg_user }};"
+          args:
+            creates: /var/secrets/pg_pw.txt
+
+    - name: Start and enable Redis service
+      service:
+        name: redis-server
+        state: started
+        enabled: yes
+
+    - name: Create log directory for Nginx
+      file:
+        path: "{{ log_directory }}"
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Create log files for Nginx
+      file:
+        path: "{{ item }}"
+        state: touch
+        owner: hng
+        group: hng
+        mode: '0644'
+      loop:
+        - "{{ log_directory }}/error.log"
+        - "{{ log_directory }}/out.log"
+
+    - name: Configure and run the application
+      block:
+        - name: Export environment variables
+          lineinfile:
+            path: "{{ app_directory }}/.env"
+            create: yes
+            line: "{{ item }}"
+          loop:
+            - "DATABASE_URL=postgresql://{{ pg_user }}:{{ pg_password }}@localhost:5432/{{ pg_database }}"
+            - "REDIS_URL=redis://localhost:6379/0"
+
+        - name: Run the application
+          shell: |
+            source {{ app_directory }}/venv/bin/activate
+            uvicorn app.main:app --host 127.0.0.1 --port 3000 &
+          args:
+            chdir: "{{ app_directory }}"
+          become: yes
+          become_user: hng
+
+    - name: Configure Nginx
+      block:
+        - name: Remove default Nginx configuration
+          file:
+            path: /etc/nginx/sites-enabled/default
+            state: absent
+
+        - name: Create Nginx configuration for the app
+          copy:
+            dest: "{{ nginx_conf_file }}"
+            content: |
+              server {
+                  listen 80;
+                  server_name localhost;
+
+                  location / {
+                      proxy_pass http://127.0.0.1:3000;
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                  }
+
+                  error_log /var/log/stage_5b/error.log;
+                  access_log /var/log/stage_5b/out.log;
+              }
+
+        - name: Enable Nginx configuration
+          file:
+            src: "{{ nginx_conf_file }}"
+            dest: "{{ nginx_conf_link }}"
+            state: link
+
+        - name: Test Nginx configuration
+          command: nginx -t
+
+        - name: Restart Nginx
+          service:
+            name: nginx
+            state: restarted
