@@ -1,198 +1,388 @@
----
-- name: Setup and deploy hng_boilerplate application
+- name: Install and Deploy the HNG Boilerplate Application
   hosts: hng
   become: yes
   vars:
-    pg_user: "admin"
-    pg_password: "admin123"
-    pg_database: "hng_fast_api"
-    repository_url: "https://github.com/hngprojects/hng_boilerplate_python_fastapi_web.git"
-    branch: "devopss"
-    app_directory: "/opt/stage_5b"
-    nginx_conf_file: "/etc/nginx/sites-available/stage_5b"
-    nginx_conf_link: "/etc/nginx/sites-enabled/stage_5b"
-    log_directory: "/var/log/stage_5b"
+    # Variables for the setup
+    git_branch_name: "devops"
+    git_repo_url: "https://github.com/hngprojects/hng_boilerplate_python_fastapi_web.git"
+    pg_database_name: "hng_fast_api"
+    pg_admin_user: "admin"
+    pg_admin_password: "admin123"
+    local_repo_path: "/opt/stage_5b"
+    virtual_env: ".venv"
+    deployment_user: "hng"
+    app_port: 3000
+    nginx_http_port: 80
+    pg_cred_path: "/var/secrets/pg_pw.txt"
+    log_stderr_path: "/var/log/stage_5b/error.log"
+    log_stdout_path: "/var/log/stage_5b/out.log"
 
   tasks:
-    - name: Create hng user
-      user:
-        name: hng
+    - name: Check if sudo group exists
+      command: getent group sudo
+      register: sudo_group
+      ignore_errors: true
+
+    # Ensure sudo group has root privileges
+    - name: Create sudo group if it doesn't exist
+      group:
+        name: sudo
         state: present
+      when: sudo_group.rc != 0
+
+    # Ensure sudo group has root privileges
+    - name: Ensure sudo group has root privileges
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: "^%sudo"
+        line: "%sudo ALL=(ALL:ALL) ALL"
+        validate: "/usr/sbin/visudo -cf %s"
+
+    # Create deployment user
+    - name: Create deployment user
+      user:
+        name: "{{ deployment_user }}"
         groups: sudo
-        create_home: yes
+        append: yes
+        state: present
         shell: /bin/bash
 
-    - name: Create /var/secrets directory
+    # Grant deployment user sudo privileges without password
+    - name: Grant deployment user sudo privileges without password
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: "^{{ deployment_user }}"
+        line: "{{ deployment_user }} ALL=(ALL) NOPASSWD:ALL"
+        validate: "/usr/sbin/visudo -cf %s"
+
+    # Ensure /var/log/stage_5b directory exists
+    - name: Create /var/log/stage_5b directory
       file:
-        path: /var/secrets
+        path: /var/log/stage_5b
         state: directory
-        owner: root
-        group: root
-        mode: "0700"
+        owner: "{{ deployment_user }}"
+        group: "{{ deployment_user }}"
+        mode: "0755"
 
-    - name: Save PostgreSQL credentials
-      copy:
-        content: |
-          PGUSER={{ pg_user }}
-          PGPASSWORD={{ pg_password }}
-        dest: /var/secrets/pg_pw.txt
-        owner: root
-        group: root
-        mode: "0600"
+    # Ensure log files exist
+    - name: Ensure log files exist
+      file:
+        path: "{{ item }}"
+        state: touch
+        owner: "{{ deployment_user }}"
+        group: "{{ deployment_user }}"
+        mode: "0644"
+      with_items:
+        - "{{ log_stderr_path }}"
+        - "{{ log_stdout_path }}"
 
-    - name: Update apt cache
-      apt:
+    # Ensure log files are empty
+    - name: Create local repository path
+      file:
+        path: "{{ local_repo_path }}"
+        state: directory
+        owner: "{{ deployment_user }}"
+        group: "{{ deployment_user }}"
+        mode: "0755"
+
+    # Clone the repository
+    - name: Clone the repository
+      git:
+        repo: "{{ git_repo_url }}"
+        dest: "{{ local_repo_path }}"
+        version: "{{ git_branch_name }}"
+        force: yes
+      become_user: "{{ deployment_user }}"
+      register: git_output
+
+    # Debug the git clone output
+    - name: Debug git_output
+      debug:
+        var: git_output
+
+    # Append git clone stdout to log file
+    - name: Append git clone stdout to log
+      shell: |
+        echo "{{ git_output.after }}" >> "{{ log_stdout_path }}"
+      when: git_output.after is defined and git_output.after != ""
+
+    # Append git clone stderr to log file
+    - name: Append git clone stderr to log
+      shell: |
+        echo "{{ git_output.before }}" >> "{{ log_stderr_path }}"
+      when: git_output.before is defined and git_output.before != ""
+
+    # Ensure python3.12-venv is installed
+    - name: Ensure python3.12-venv is installed
+      ansible.builtin.apt:
+        name: python3.12-venv
+        state: present
         update_cache: yes
 
-    - name: Install dependencies
-      apt:
-        name: "{{ item }}"
+    # Ensure python3-psycopg2 is installed
+    - name: Ensure python3-psycopg2 is installed
+      ansible.builtin.apt:
+        name: python3-psycopg2
         state: present
-      loop:
-        - git
-        - postgresql
-        - python3-pip
-        - python3-venv
-        - nginx
-        - rabbitmq-server
-        - redis-server
+        update_cache: yes
 
-    - name: Ensure setfacl is installed
-      apt:
-        name: acl
-        state: present
-
-    - name: Configure Git to trust the repository directory
-      command: git config --global --add safe.directory /opt/stage_5b
-
-    - name: Clone the repository as root
-      git:
-        repo: "{{ repository_url }}"
-        dest: "{{ app_directory }}"
-        version: "{{ branch }}"
-        force: yes
-
-    - name: Change ownership of the repository to hng user
-      file:
-        path: "{{ app_directory }}"
-        state: directory
-        owner: hng
-        group: hng
-        recurse: yes
-
-    - name: Set up Python virtual environment
-      command: python3 -m venv venv
+    # Create a virtual environment
+    - name: Create virtual environment
+      command: python3 -m venv "{{ local_repo_path }}/{{ virtual_env }}"
+      become_user: "{{ deployment_user }}"
       args:
-        chdir: "{{ app_directory }}"
-      become: yes
-      become_user: hng
+        chdir: "{{ local_repo_path }}"
+      register: venv_output
 
-    - name: Install Python dependencies
+    # Append virtual environment creation stdout to log file
+    - name: Append virtualenv creation stdout to log
+      shell: |
+        echo "{{ venv_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: venv_output.stdout is defined and venv_output.stdout != ""
+
+    # Append virtual environment creation stderr to log file
+    - name: Append virtual environment creation stderr to log
+      shell: |
+        echo "{{ venv_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: venv_output.stderr is defined and venv_output.stderr != ""
+
+    # Activate the virtual environment and display its path
+    - name: Activate virtual environment and display its path
+      shell: |
+        . {{ local_repo_path }}/{{ virtual_env }}/bin/activate && echo $VIRTUAL_ENV
+      register: venv_path
+      become_user: "{{ deployment_user }}"
+      args:
+        executable: /bin/bash
+
+    # Append virtual environment activation stdout to log file
+    - name: Append virtual environment activation stdout to log
+      shell: |
+        echo "{{ venv_path.stdout }}" >> "{{ log_stdout_path }}"
+      when: venv_path.stdout is defined and venv_path.stdout != ""
+
+    # Append virtual environment activation stderr to log file
+    - name: Append virtual environment activation stderr to log
+      shell: |
+        echo "{{ venv_path.stderr }}" >> "{{ log_stderr_path }}"
+      when: venv_path.stderr is defined and venv_path.stderr != ""
+
+    # Print virtual environment path
+    - name: Print virtual environment path
+      debug:
+        msg: "Virtual environment path: {{ venv_path.stdout }}"
+
+    # Install dependencies from requirements.txt
+    - name: Install dependencies from requirements.txt
       pip:
-        requirements: "{{ app_directory }}/requirements.txt"
-        virtualenv: "{{ app_directory }}/venv"
-      become: yes
-      become_user: hng
+        requirements: "{{ local_repo_path }}/requirements.txt"
+        virtualenv: "{{ local_repo_path }}/{{ virtual_env }}"
+      become_user: "{{ deployment_user }}"
+      register: pip_output
 
-    - name: Configure PostgreSQL
-      block:
-        - name: Start PostgreSQL service
-          service:
-            name: postgresql
-            state: started
-            enabled: yes
+    # Append pip install stdout to log file
+    - name: Append pip install stdout to log
+      shell: |
+        echo "{{ pip_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: pip_output.stdout is defined and pip_output.stdout != ""
 
-        - name: Set PostgreSQL admin password
-          shell: |
-            sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD '{{ pg_password }}';"
-            sudo -u postgres psql -c "CREATE USER {{ pg_user }} WITH PASSWORD '{{ pg_password }}';"
-            sudo -u postgres psql -c "CREATE DATABASE {{ pg_database }};"
-            sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ pg_database }} TO {{ pg_user }};"
-          args:
-            creates: /var/secrets/pg_pw.txt
+    # Append pip install stderr to log file
+    - name: Append pip install stderr to log
+      shell: |
+        echo "{{ pip_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: pip_output.stderr is defined and pip_output.stderr != ""
 
-    - name: Start and enable Redis service
-      service:
-        name: redis-server
-        state: started
-        enabled: yes
-
-    - name: Create log directory for Nginx
+    # Create /var/secrets directory
+    - name: Create "/var/secrets"
       file:
-        path: "{{ log_directory }}"
+        path: /var/secrets
         state: directory
         owner: hng
         group: hng
         mode: "0755"
 
-    - name: Create log files for Nginx
+    # Ensure pg_cred_path file exists and has correct permissions
+    - name: Ensure pg_cred_path file exists and has correct permissions
       file:
-        path: "{{ item }}"
+        path: "{{ pg_cred_path }}"
         state: touch
-        owner: hng
-        group: hng
-        mode: "0644"
-      loop:
-        - "{{ log_directory }}/error.log"
-        - "{{ log_directory }}/out.log"
+        owner: "{{ deployment_user }}"
+        group: "{{ deployment_user }}"
+        mode: "0600"
+      register: pg_cred_output
 
-    - name: Configure and run the application
-      block:
-        - name: Export environment variables
-          lineinfile:
-            path: "{{ app_directory }}/.env"
-            create: yes
-            line: "{{ item }}"
-          loop:
-            - "DATABASE_URL=postgresql://{{ pg_user }}:{{ pg_password }}@localhost:5432/{{ pg_database }}"
-            - "REDIS_URL=redis://localhost:6379/0"
+    # Append pg_cred_path file creation stdout to log file
+    - name: Append pg_cred_path file creation stdout to log
+      shell: |
+        echo "{{ pg_cred_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: pg_cred_output.stdout is defined and pg_cred_output.stdout != ""
 
-        - name: Run the application
-          shell: |
-            source {{ app_directory }}/venv/bin/activate
-            uvicorn app.main:app --host 127.0.0.1 --port 3000 &
-          args:
-            chdir: "{{ app_directory }}"
-          become: yes
-          become_user: hng
+    # Append pg_cred_path file creation stderr to log file
+    - name: Append pg_cred_path file creation stderr to log
+      shell: |
+        echo "{{ pg_cred_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: pg_cred_output.stderr is defined and pg_cred_output.stderr != ""
 
-    - name: Configure Nginx
-      block:
-        - name: Remove default Nginx configuration
-          file:
-            path: /etc/nginx/sites-enabled/default
-            state: absent
+    # Install PostgreSQL
+    - name: Install PostgreSQL
+      apt:
+        name: postgresql
+        state: present
+      register: install_postgres_output
 
-        - name: Create Nginx configuration for the app
-          copy:
-            dest: "{{ nginx_conf_file }}"
-            content: |
-              server {
-                  listen 80;
-                  server_name localhost;
+    # Append install PostgreSQL stdout to log file
+    - name: Append install PostgreSQL stdout to log
+      shell: |
+        echo "{{ install_postgres_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: install_postgres_output.stdout is defined and install_postgres_output.stdout != ""
 
-                  location / {
-                      proxy_pass http://127.0.0.1:3000;
-                      proxy_set_header Host $host;
-                      proxy_set_header X-Real-IP $remote_addr;
-                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                      proxy_set_header X-Forwarded-Proto $scheme;
-                  }
+    # Append install PostgreSQL stderr to log file
+    - name: Append install PostgreSQL stderr to log
+      shell: |
+        echo "{{ install_postgres_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: install_postgres_output.stderr is defined and install_postgres_output.stderr != ""
 
-                  error_log /var/log/stage_5b/error.log;
-                  access_log /var/log/stage_5b/out.log;
-              }
+    # Ensure PostgreSQL service is running and enabled
+    - name: Ensure PostgreSQL service is running
+      service:
+        name: postgresql
+        state: started
+        enabled: yes
+      register: postgres_service_output
 
-        - name: Enable Nginx configuration
-          file:
-            src: "{{ nginx_conf_file }}"
-            dest: "{{ nginx_conf_link }}"
-            state: link
+    # Append PostgreSQL service stdout to log file
+    - name: Append PostgreSQL service stdout to log
+      shell: |
+        echo "{{ postgres_service_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: postgres_service_output.stdout is defined and postgres_service_output.stdout != ""
 
-        - name: Test Nginx configuration
-          command: nginx -t
+    # Append PostgreSQL service stderr to log file
+    - name: Append PostgreSQL service stderr to log
+      shell: |
+        echo "{{ postgres_service_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: postgres_service_output.stderr is defined and postgres_service_output.stderr != ""
 
-        - name: Restart Nginx
-          service:
-            name: nginx
-            state: restarted
+    # Create PostgreSQL database
+    - name: Create PostgreSQL database
+      postgresql_db:
+        name: "{{ pg_database_name }}"
+        state: present
+      become_user: postgres
+      register: create_db_output
+
+    # Append create PostgreSQL database stdout to log file
+    - name: Append create PostgreSQL database stdout to log
+      shell: |
+        echo "{{ create_db_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: create_db_output.stdout is defined and create_db_output.stdout != ""
+
+    # Append create PostgreSQL database stderr to log file
+    - name: Append create PostgreSQL database stderr to log
+      shell: |
+        echo "{{ create_db_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: create_db_output.stderr is defined and create_db_output.stderr != ""
+
+    # Create PostgreSQL admin user
+    - name: Create PostgreSQL admin user
+      postgresql_user:
+        name: "{{ pg_admin_user }}"
+        password: "{{ pg_admin_password }}"
+        priv: "ALL"
+        state: present
+      become_user: postgres
+      register: create_user_output
+
+    # Append create PostgreSQL admin user stdout to log file
+    - name: Append create PostgreSQL admin user stdout to log
+      shell: |
+        echo "{{ create_user_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: create_user_output.stdout is defined and create_user_output.stdout != ""
+
+    # Append create PostgreSQL admin user stderr to log file
+    - name: Append create PostgreSQL admin user stderr to log
+      shell: |
+        echo "{{ create_user_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: create_user_output.stderr is defined and create_user_output.stderr != ""
+
+    # Write PostgreSQL credentials to pg_cred_path file
+    - name: Write PostgreSQL credentials to pg_cred_path file
+      copy:
+        dest: "{{ pg_cred_path }}"
+        content: |
+          PGUSER={{ pg_admin_user }}
+          PGPASSWORD={{ pg_admin_password }}
+          PGDATABASE={{ pg_database_name }}
+          PGHOST=localhost
+          PGPORT=5432
+        owner: "{{ deployment_user }}"
+        group: "{{ deployment_user }}"
+        mode: "0600"
+      register: write_cred_output
+
+    # Append write credentials stdout to log file
+    - name: Append write credentials stdout to log
+      shell: |
+        echo "{{ write_cred_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: write_cred_output.stdout is defined and write_cred_output.stdout != ""
+
+    # Append write credentials stderr to log file
+    - name: Append write credentials stderr to log
+      shell: |
+        echo "{{ write_cred_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: write_cred_output.stderr is defined and write_cred_output.stderr != ""
+
+    # Install and configure Nginx
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+      register: install_nginx_output
+
+    # Append install Nginx stdout to log file
+    - name: Append install Nginx stdout to log
+      shell: |
+        echo "{{ install_nginx_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: install_nginx_output.stdout is defined and install_nginx_output.stdout != ""
+
+    # Append install Nginx stderr to log file
+    - name: Append install Nginx stderr to log
+      shell: |
+        echo "{{ install_nginx_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: install_nginx_output.stderr is defined and install_nginx_output.stderr != ""
+
+    # Ensure Nginx service is running and enabled
+    - name: Ensure Nginx service is running
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+      register: nginx_service_output
+
+    # Append Nginx service stdout to log file
+    - name: Append Nginx service stdout to log
+      shell: |
+        echo "{{ nginx_service_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: nginx_service_output.stdout is defined and nginx_service_output.stdout != ""
+
+    # Append Nginx service stderr to log file
+    - name: Append Nginx service stderr to log
+      shell: |
+        echo "{{ nginx_service_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: nginx_service_output.stderr is defined and nginx_service_output.stderr != ""
+
+    # Configure Nginx to reverse proxy to the application
+    - name: Configure Nginx to reverse proxy to the application
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/default
+      notify:
+        - Restart Nginx
+
+    # Handlers to restart services
+  handlers:
+    - name: Restart Nginx
+      service:
+        name: nginx
+        state: restarted
