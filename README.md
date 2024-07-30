@@ -47,4 +47,6 @@ pipelining = True
 ```
 
 4. Run the Ansible Playbook
+   ```sh
    ansible-playbook main.yaml -b -i inventory.cfg
+   ```
