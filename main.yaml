@@ -1,3 +1,4 @@
+---
 - name: Install and Deploy the HNG Boilerplate Application
   hosts: hng
   become: yes
@@ -143,7 +144,7 @@
       when: venv_output.stdout is defined and venv_output.stdout != ""
 
     # Append virtual environment creation stderr to log file
-    - name: Append virtual environment creation stderr to log
+    - name: Append virtualenv creation stderr to log
       shell: |
         echo "{{ venv_output.stderr }}" >> "{{ log_stderr_path }}"
       when: venv_output.stderr is defined and venv_output.stderr != ""
@@ -265,11 +266,11 @@
       when: postgres_service_output.stderr is defined and postgres_service_output.stderr != ""
 
     # Create PostgreSQL database
-    - name: Create PostgreSQL database
-      postgresql_db:
+    - name: Create PostgreSQL database and admin user
+      become_user: postgres
+      community.postgresql.postgresql_db:
         name: "{{ pg_database_name }}"
         state: present
-      become_user: postgres
       register: create_db_output
 
     # Append create PostgreSQL database stdout to log file
@@ -286,12 +287,13 @@
 
     # Create PostgreSQL admin user
     - name: Create PostgreSQL admin user
-      postgresql_user:
+      become_user: postgres
+      community.postgresql.postgresql_user:
         name: "{{ pg_admin_user }}"
         password: "{{ pg_admin_password }}"
+        db: "{{ pg_database_name }}"
         priv: "ALL"
         state: present
-      become_user: postgres
       register: create_user_output
 
     # Append create PostgreSQL admin user stdout to log file
@@ -306,37 +308,117 @@
         echo "{{ create_user_output.stderr }}" >> "{{ log_stderr_path }}"
       when: create_user_output.stderr is defined and create_user_output.stderr != ""
 
-    # Write PostgreSQL credentials to pg_cred_path file
-    - name: Write PostgreSQL credentials to pg_cred_path file
+    # Save PostgreSQL admin credentials to pg_cred_path
+    - name: Save PostgreSQL admin credentials to pg_cred_path
       copy:
+        content: "postgres://{{ pg_admin_user }}:{{ pg_admin_password }}@localhost:5432/{{ pg_database_name }}"
         dest: "{{ pg_cred_path }}"
-        content: |
-          PGUSER={{ pg_admin_user }}
-          PGPASSWORD={{ pg_admin_password }}
-          PGDATABASE={{ pg_database_name }}
-          PGHOST=localhost
-          PGPORT=5432
         owner: "{{ deployment_user }}"
         group: "{{ deployment_user }}"
         mode: "0600"
-      register: write_cred_output
 
-    # Append write credentials stdout to log file
-    - name: Append write credentials stdout to log
+    # Create table in PostgreSQL database
+    - name: Create table in PostgreSQL database
+      become_user: postgres
+      postgresql_query:
+        db: "{{ pg_database_name }}"
+        query: "CREATE TABLE IF NOT EXISTS dummy_table (column1 VARCHAR(255), column2 VARCHAR(255));"
+
+    # Insert data into the table
+    - name: Insert data into the table
+      become_user: postgres
+      postgresql_query:
+        db: "{{ pg_database_name }}"
+        query: "INSERT INTO dummy_table (column1, column2) VALUES ('dummy1', 'dummy2');"
+
+    # Copy .env.sample to .env
+    - name: Copy .env.sample to .env
+      copy:
+        src: "{{ local_repo_path }}/.env.sample"
+        dest: "{{ local_repo_path }}/.env"
+        owner: "{{ deployment_user }}"
+        group: "{{ deployment_user }}"
+        mode: "0644"
+        remote_src: yes
+
+    # Update .env file with Postgres URL
+    - name: Update .env file with Postgres URL
+      lineinfile:
+        path: "{{ local_repo_path }}/.env"
+        regexp: "^DB_URL="
+        line: "DB_URL=postgresql://{{ pg_admin_user }}:{{ pg_admin_password }}@localhost:5432/{{ pg_database_name }}"
+
+    # Update .env file with Postgres database name
+    - name: Update .env file with Postgres details
+      lineinfile:
+        path: "{{ local_repo_path }}/.env"
+        regexp: "^DB_NAME="
+        line: "DB_NAME={{ pg_database_name }}"
+
+    # Update .env file with Postgres user
+    - name: Update .env file with Postgres user
+      lineinfile:
+        path: "{{ local_repo_path }}/.env"
+        regexp: "^DB_USER="
+        line: "DB_USER={{ pg_admin_user }}"
+
+    # Update .env file with Postgres password
+    - name: Update .env file with Postgres password
+      lineinfile:
+        path: "{{ local_repo_path }}/.env"
+        regexp: "^DB_PASSWORD="
+        line: "DB_PASSWORD={{ pg_admin_password }}"
+
+    # Update main.py to run on port 3000
+    - name: Update main.py to run on port 3000
+      replace:
+        path: "{{ local_repo_path }}/main.py"
+        regexp: "port=7001"
+        replace: "port={{ app_port }}"
+
+    # Run the FastAPI application server
+    - name: Run the FastAPI application server
       shell: |
-        echo "{{ write_cred_output.stdout }}" >> "{{ log_stdout_path }}"
-      when: write_cred_output.stdout is defined and write_cred_output.stdout != ""
+        . {{ local_repo_path }}/{{ virtual_env }}/bin/activate
+        nohup uvicorn main:app --host 0.0.0.0 --port {{ app_port }} >> "{{ log_stdout_path }}" 2>> "{{ log_stderr_path }}" &
+      args:
+        chdir: "{{ local_repo_path }}"
+      become_user: "{{ deployment_user }}"
+      async: 0
+      poll: 5
+      register: app_run_output
 
-    # Append write credentials stderr to log file
-    - name: Append write credentials stderr to log
+    # Append application run stdout to log file
+    - name: Append application run stdout to log
       shell: |
-        echo "{{ write_cred_output.stderr }}" >> "{{ log_stderr_path }}"
-      when: write_cred_output.stderr is defined and write_cred_output.stderr != ""
+        echo "{{ app_run_output.stdout }}" >> "{{ log_stdout_path }}"
+      when: app_run_output.stdout is defined and app_run_output.stdout != ""
 
-    # Install and configure Nginx
-    - name: Install Nginx
+    # Append application run stderr to log file
+    - name: Append application run stderr to log
+      shell: |
+        echo "{{ app_run_output.stderr }}" >> "{{ log_stderr_path }}"
+      when: app_run_output.stderr is defined and app_run_output.stderr != ""
+
+    # Add the Nginx official repository key
+    - name: Add the Nginx official repository key
+      ansible.builtin.apt_key:
+        url: http://nginx.org/keys/nginx_signing.key
+        state: present
+      become: yes
+
+    # Add the Nginx official repository
+    - name: Add the Nginx official repository
+      ansible.builtin.apt_repository:
+        repo: "deb http://nginx.org/packages/ubuntu/ {{ ansible_distribution_release }} nginx"
+        state: present
+      become: yes
+      register: install_nginx_output
+
+    # Install Nginx 1.26
+    - name: Install Nginx 1.26
       apt:
-        name: nginx
+        name: nginx=1.26.0-1~{{ ansible_distribution_release }}
         state: present
       register: install_nginx_output
 
@@ -352,37 +434,25 @@
         echo "{{ install_nginx_output.stderr }}" >> "{{ log_stderr_path }}"
       when: install_nginx_output.stderr is defined and install_nginx_output.stderr != ""
 
-    # Ensure Nginx service is running and enabled
-    - name: Ensure Nginx service is running
-      service:
-        name: nginx
-        state: started
-        enabled: yes
-      register: nginx_service_output
+    # Remove default Nginx site configuration
+    - name: Remove default Nginx site configuration
+      file:
+        path: /etc/nginx/conf.d/default.conf
+        state: absent
+      notify:
+        - restart nginx
 
-    # Append Nginx service stdout to log file
-    - name: Append Nginx service stdout to log
-      shell: |
-        echo "{{ nginx_service_output.stdout }}" >> "{{ log_stdout_path }}"
-      when: nginx_service_output.stdout is defined and nginx_service_output.stdout != ""
-
-    # Append Nginx service stderr to log file
-    - name: Append Nginx service stderr to log
-      shell: |
-        echo "{{ nginx_service_output.stderr }}" >> "{{ log_stderr_path }}"
-      when: nginx_service_output.stderr is defined and nginx_service_output.stderr != ""
-
-    # Configure Nginx to reverse proxy to the application
-    - name: Configure Nginx to reverse proxy to the application
+    # Copy custom Nginx configuration from template
+    - name: Copy custom Nginx configuration
       template:
         src: nginx.conf.j2
-        dest: /etc/nginx/sites-available/default
+        dest: /etc/nginx/conf.d/default.conf
       notify:
-        - Restart Nginx
+        - restart nginx
 
-    # Handlers to restart services
+  # Handlers to restart Nginx service
   handlers:
-    - name: Restart Nginx
+    - name: restart nginx
       service:
         name: nginx
         state: restarted
