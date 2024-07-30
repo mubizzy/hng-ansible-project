@@ -7,7 +7,7 @@
     pg_password: "admin123"
     pg_database: "hng_fast_api"
     repository_url: "https://github.com/hngprojects/hng_boilerplate_python_fastapi_web.git"
-    branch: "devops"
+    branch: "devopss"
     app_directory: "/opt/stage_5b"
     nginx_conf_file: "/etc/nginx/sites-available/stage_5b"
     nginx_conf_link: "/etc/nginx/sites-enabled/stage_5b"
@@ -28,7 +28,7 @@
         state: directory
         owner: root
         group: root
-        mode: '0700'
+        mode: "0700"
 
     - name: Save PostgreSQL credentials
       copy:
@@ -38,7 +38,7 @@
         dest: /var/secrets/pg_pw.txt
         owner: root
         group: root
-        mode: '0600'
+        mode: "0600"
 
     - name: Update apt cache
       apt:
@@ -123,7 +123,7 @@
         state: directory
         owner: hng
         group: hng
-        mode: '0755'
+        mode: "0755"
 
     - name: Create log files for Nginx
       file:
@@ -131,7 +131,7 @@
         state: touch
         owner: hng
         group: hng
-        mode: '0644'
+        mode: "0644"
       loop:
         - "{{ log_directory }}/error.log"
         - "{{ log_directory }}/out.log"
