@@ -19,7 +19,7 @@ This repository contains Ansible playbooks and configurations for deploying the 
 1. **Clone this repository**
 
    ```sh
-   git clone https://github.com/yourusername/ansible-hng-boilerplate-deployment.git
+   git clone https://github.com/yourusername/hng-ansible-project.git
 
    ```
 
