@@ -36,6 +36,7 @@ Replace your_server_ip with the IP address of your server and /path/to/your/priv
 
 3. Create ansible.cfg file with the following structure
 
+```sh
 [defaults]
 
 allow_world_readable_tmpfiles = True
@@ -43,6 +44,7 @@ allow_world_readable_tmpfiles = True
 [ssh_connection]
 
 pipelining = True
+```
 
 4. Run the Ansible Playbook
    ansible-playbook main.yaml -b -i inventory.cfg
