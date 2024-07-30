@@ -20,7 +20,6 @@ This repository contains Ansible playbooks and configurations for deploying the 
 
    ```sh
    git clone https://github.com/yourusername/ansible-hng-boilerplate-deployment.git
-   cd ansible-hng-boilerplate-deployment
 
    ```
 
